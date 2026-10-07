@@ -8,6 +8,14 @@ import { useServerEvents } from '../useServerEvents'
 
 const FRAME = 1 / 30
 
+// Sprint 1/T5: safe-zone margins in px on a 1080x1920 canvas (mirrors backend platforms.py)
+const SAFE_ZONES: Record<string, { label: string; top: number; right: number; bottom: number; left: number }> = {
+  tiktok: { label: 'TikTok', top: 150, right: 120, bottom: 380, left: 40 },
+  reels: { label: 'Reels', top: 140, right: 100, bottom: 340, left: 40 },
+  shorts: { label: 'Shorts', top: 120, right: 60, bottom: 300, left: 40 },
+}
+const ASPECT_RATIO: Record<string, number> = { '9:16': 9 / 16, '1:1': 1, '4:5': 4 / 5 }
+
 export default function ProjectPage({ projectId }: { projectId: number }) {
   const [project, setProject] = useState<ProjectDetail | null>(null)
   const [jobs, setJobs] = useState<Record<number, Job>>({})
@@ -19,6 +27,7 @@ export default function ProjectPage({ projectId }: { projectId: number }) {
   const [markOut, setMarkOut] = useState<number | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [videoRatio, setVideoRatio] = useState(16 / 9)
+  const [szPreview, setSzPreview] = useState('') // Sprint 1/T5: safe-zone preview overlay
   const videoRef = useRef<HTMLVideoElement>(null)
   const stopAt = useRef<number | null>(null)
 
@@ -192,8 +201,12 @@ export default function ProjectPage({ projectId }: { projectId: number }) {
   if (!project || !video) return <p className="text-zinc-400">Memuat…</p>
 
   const ready = project.status === 'ready' && video.media_url
-  const showCrop = selected && selected.aspect === '9:16' && selected.reframe === 'center'
-  const cropW = Math.min(1, (9 / 16) / videoRatio)
+  // Sprint 1/T2: crop guide works for all vertical aspects, not just 9:16
+  const selAspect = selected && selected.aspect !== 'original' ? selected.aspect : '9:16'
+  const selRatio = ASPECT_RATIO[selAspect] ?? 9 / 16
+  const showCrop = selected && selected.aspect !== 'original' && selected.reframe === 'center'
+  const cropW = Math.min(1, selRatio / videoRatio)
+  const sz = szPreview ? SAFE_ZONES[szPreview] : null // Sprint 1/T5
 
   return (
     <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
@@ -259,6 +272,32 @@ export default function ProjectPage({ projectId }: { projectId: number }) {
                   <div className="absolute inset-y-0 right-0 bg-black/60" style={{ width: `${(1 - cropW) * (1 - selected.crop_x) * 100}%` }} />
                 </div>
               )}
+              {/* Sprint 1/T5: safe-zone guide overlay */}
+              {sz && (
+                <div className="pointer-events-none absolute inset-0">
+                  <div
+                    className="absolute inset-y-0"
+                    style={{ left: `${((1 - cropW) / 2) * 100}%`, width: `${cropW * 100}%` }}
+                  >
+                    <div className="absolute inset-x-0 top-0 bg-rose-500/25" style={{ height: `${(sz.top / 1920) * 100}%` }} />
+                    <div className="absolute inset-x-0 bottom-0 bg-rose-500/25" style={{ height: `${(sz.bottom / 1920) * 100}%` }} />
+                    <div className="absolute inset-y-0 left-0 bg-rose-500/25" style={{ width: `${(sz.left / 1080) * 100}%` }} />
+                    <div className="absolute inset-y-0 right-0 bg-rose-500/25" style={{ width: `${(sz.right / 1080) * 100}%` }} />
+                    <div
+                      className="absolute border-2 border-dashed border-emerald-400/80"
+                      style={{
+                        top: `${(sz.top / 1920) * 100}%`,
+                        bottom: `${(sz.bottom / 1920) * 100}%`,
+                        left: `${(sz.left / 1080) * 100}%`,
+                        right: `${(sz.right / 1080) * 100}%`,
+                      }}
+                    />
+                    <span className="absolute left-1/2 top-1 -translate-x-1/2 rounded bg-black/70 px-2 py-0.5 text-[10px] text-emerald-300">
+                      Safe-zone {sz.label}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-sm">
@@ -270,6 +309,20 @@ export default function ProjectPage({ projectId }: { projectId: number }) {
               <span className="ml-1 font-mono text-zinc-300">
                 {fmtTime(current, true)} / {fmtTime(duration)}
               </span>
+
+              {/* Sprint 1/T5: safe-zone preview toggle */}
+              <div className="flex items-center gap-1 text-xs">
+                <span className="text-zinc-500">Safe:</span>
+                {['', 'tiktok', 'reels', 'shorts'].map((z) => (
+                  <button
+                    key={z}
+                    onClick={() => setSzPreview(z)}
+                    className={`rounded px-1.5 py-1 ${szPreview === z ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'}`}
+                  >
+                    {z === '' ? 'Off' : SAFE_ZONES[z].label}
+                  </button>
+                ))}
+              </div>
 
               <div className="ml-auto flex items-center gap-2">
                 <button onClick={() => setMarkIn(current)} className="rounded-md border border-emerald-500/50 px-2.5 py-1.5 text-emerald-300 hover:bg-emerald-500/10">

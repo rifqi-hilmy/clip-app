@@ -17,7 +17,8 @@ export type Video = {
 }
 
 export type Reframe = 'blur' | 'center' | 'face'
-export type Aspect = '9:16' | 'original'
+export type Aspect = '9:16' | '1:1' | '4:5' | 'original'
+export type ReviewState = 'pending' | 'approved' | 'rejected'
 
 export type Clip = {
   id: number
@@ -32,9 +33,23 @@ export type Clip = {
   reframe: Reframe
   crop_x: number
   caption_style: string | null
+  // Sprint 1
+  loudnorm: boolean
+  review_state: ReviewState
+  safe_zone: string | null
+  remove_silence: boolean
+  silence_db: number
+  silence_min_dur: number
   export_path: string | null
   export_url: string | null
   srt_url: string | null
+}
+
+export type StorageUsage = {
+  total_mb: number
+  videos_mb: number
+  exports_mb: number
+  by_project: { project_id: number; name: string; mb: number }[]
 }
 
 export type Job = {
@@ -107,7 +122,17 @@ export const api = {
   updateClip: (id: number, c: Partial<Clip>) => req<Clip>('PATCH', `/clips/${id}`, c),
   deleteClip: (id: number) => req('DELETE', `/clips/${id}`),
   renderClip: (id: number) => req<Job>('POST', `/clips/${id}/render`),
-  renderAll: (pid: number) => req<Job[]>('POST', `/projects/${pid}/render-all`),
+  renderAll: (pid: number) => req<{ jobs: Job[]; skipped: number }>('POST', `/projects/${pid}/render-all`),
+  // Sprint 1: review
+  reviewClip: (id: number, state: ReviewState) => req<Clip>('PATCH', `/clips/${id}/review`, { state }),
+  reviewAllClips: (pid: number, state: ReviewState) =>
+    req<{ updated: number }>('POST', `/projects/${pid}/review-all`, { state }),
+  // Sprint 1: storage
+  storageUsage: () => req<StorageUsage>('GET', '/storage/usage'),
+  deleteSource: (pid: number) => req('DELETE', `/projects/${pid}/source`),
+  deleteVideoCache: (vid: number) => req('DELETE', `/videos/${vid}/cache`),
+  // Sprint 1: safe zones
+  safeZones: () => req<{ id: string; label: string }[]>('GET', '/platforms/safe-zones'),
   whisperModels: () => req<{ models: string[]; default: string }>('GET', '/whisper/models'),
   captionPresets: () => req<{ id: string; label: string }[]>('GET', '/captions/presets'),
   transcribe: (pid: number, model: string, language: string | null, force = false) =>

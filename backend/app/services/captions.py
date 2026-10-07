@@ -84,12 +84,21 @@ def _esc(text: str) -> str:
     return text.replace("\\", "\\\\").replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
-def build_ass(words: list[Word], style: str, width: int, height: int) -> str:
+def build_ass(words: list[Word], style: str, width: int, height: int,
+              safe_zone: str | None = None) -> str:
+    """Build an ASS subtitle file. safe_zone (Sprint 1/T5) lifts captions above
+    the platform's bottom UI area: 'tiktok' | 'reels' | 'shorts' | None."""
     p = PRESETS.get(style) or PRESETS["bold"]
     scale = min(width, height) / 1080
     vscale = height / 1920 if height > width else height / 1080 * 0.45
     size = int(p["size"] * scale)
     margin_v = int(p["margin_v"] * vscale)
+    if safe_zone:
+        try:
+            from .platforms import scaled_zone
+            margin_v = max(margin_v, scaled_zone(safe_zone, width, height)["bottom"])
+        except KeyError:
+            pass
 
     header = (
         "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n"
@@ -126,6 +135,30 @@ def build_ass(words: list[Word], style: str, width: int, height: int) -> str:
             ]
             events.append(f"Dialogue: 0,{_ass_time(e_start)},{_ass_time(e_end)},Default,,0,0,0,,{' '.join(parts)}")
     return header + "\n".join(events) + "\n"
+
+
+def retime_words(words: list[Word], ranges: list[tuple[float, float]]) -> list[Word]:
+    """Map word times through keep-ranges (Sprint 1/T6 silence removal).
+
+    Words fully inside a removed silence are dropped; words straddling a cut
+    are clamped to the range containing their midpoint.
+    """
+    bounds: list[tuple[float, float, float]] = []
+    offset = 0.0
+    for a, b in ranges:
+        bounds.append((a, b, offset))
+        offset += b - a
+    out: list[Word] = []
+    for w in words:
+        mid = (w.start + w.end) / 2
+        for a, b, off in bounds:
+            if a <= mid <= b:
+                ns = max(a, w.start) - a + off
+                ne = min(b, w.end) - a + off
+                if ne > ns:
+                    out.append(Word(ns, ne, w.text))
+                break
+    return out
 
 
 def build_srt(words: list[Word], max_words: int = 8, max_chars: int = 42) -> str:

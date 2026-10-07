@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, type HighlightStatus, type Job, type ProjectDetail } from '../api'
+import { api, fmtTime, type HighlightStatus, type Job, type ProjectDetail, type ReviewState } from '../api'
 
 type Props = {
   project: ProjectDetail
@@ -23,10 +23,39 @@ export default function HighlightPanel({ project, job, onComplete }: Props) {
   const [apiModel, setApiModel] = useState('')
   const [err, setErr] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [reviewing, setReviewing] = useState(false)
 
   const running = job && (job.status === 'queued' || job.status === 'running')
   const hasTranscript = !!project.transcript
   const aiClips = project.clips.filter((c) => c.source === 'ai')
+  // Sprint 1/T4: review queue
+  const pendingClips = project.clips.filter((c) => c.review_state === 'pending')
+
+  const doReview = async (clipId: number, state: ReviewState) => {
+    setReviewing(true)
+    setErr(null)
+    try {
+      await api.reviewClip(clipId, state)
+      onComplete()
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setReviewing(false)
+    }
+  }
+
+  const doReviewAll = async (state: ReviewState) => {
+    setReviewing(true)
+    setErr(null)
+    try {
+      await api.reviewAllClips(project.id, state)
+      onComplete()
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setReviewing(false)
+    }
+  }
 
   // Load status + settings on mount
   useEffect(() => {
@@ -301,6 +330,60 @@ export default function HighlightPanel({ project, job, onComplete }: Props) {
               <span className="text-xs text-zinc-500">
                 via {provider === 'ollama' ? `Ollama (${model || 'qwen2.5:3b'})` : `API (${model || apiModel || 'gemini-2.0-flash'})`}
               </span>
+            </div>
+          </div>
+        )}
+
+        {/* Sprint 1/T4: review queue */}
+        {pendingClips.length > 0 && (
+          <div className="mt-3 rounded-xl border border-amber-600/40 bg-amber-600/5 p-3">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h4 className="text-sm font-semibold text-amber-300">
+                ⏳ Perlu review ({pendingClips.length})
+              </h4>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => doReviewAll('approved')}
+                  disabled={reviewing}
+                  className="rounded bg-emerald-600 px-2.5 py-1 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-50"
+                >
+                  Terima semua
+                </button>
+                <button
+                  onClick={() => doReviewAll('rejected')}
+                  disabled={reviewing}
+                  className="rounded bg-zinc-700 px-2.5 py-1 text-xs hover:bg-zinc-600 disabled:opacity-50"
+                >
+                  Tolak semua
+                </button>
+              </div>
+            </div>
+            <div className="max-h-52 space-y-1.5 overflow-y-auto">
+              {pendingClips.map((c) => (
+                <div key={c.id} className="flex items-center gap-2 rounded-lg bg-zinc-900/70 px-2.5 py-1.5 text-xs">
+                  <span className="font-mono text-zinc-500">{fmtTime(c.start)}–{fmtTime(c.end)}</span>
+                  <span className="flex-1 truncate text-zinc-200">{c.title}</span>
+                  {c.score != null && (
+                    <span className="rounded bg-violet-600/30 px-1.5 py-0.5 font-bold text-violet-300">
+                      {Math.round(c.score)}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => doReview(c.id, 'approved')}
+                    disabled={reviewing}
+                    className="rounded bg-emerald-600 px-2 py-0.5 font-semibold hover:bg-emerald-500 disabled:opacity-50"
+                  >
+                    ✓
+                  </button>
+                  <button
+                    onClick={() => doReview(c.id, 'rejected')}
+                    disabled={reviewing}
+                    className="rounded bg-zinc-700 px-2 py-0.5 hover:bg-zinc-600 disabled:opacity-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
             </div>
           </div>
         )}

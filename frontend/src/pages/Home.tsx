@@ -1,6 +1,54 @@
 import { useEffect, useState } from 'react'
-import { api, fmtTime, type ProjectSummary, type VideoInfo } from '../api'
+import { api, fmtTime, type ProjectSummary, type StorageUsage, type VideoInfo } from '../api'
 import { useServerEvents } from '../useServerEvents'
+
+// Sprint 1/T3: storage usage bar + per-project cleanup
+function StorageBar({ onChanged }: { onChanged: () => void }) {
+  const [usage, setUsage] = useState<StorageUsage | null>(null)
+  const [open, setOpen] = useState(false)
+  const load = () => api.storageUsage().then(setUsage).catch(() => {})
+  useEffect(() => { load() }, [])
+  useServerEvents((e) => {
+    if (e.type === 'project' || (e.type === 'job' && e.job.status !== 'running')) load()
+  })
+  if (!usage) return null
+  const gb = (mb: number) => (mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(0)} MB`)
+  const del = async (pid: number, name: string) => {
+    if (!confirm(`Hapus file video sumber project "${name}"? Klip & transkrip tetap ada, bisa download ulang.`)) return
+    try { await api.deleteSource(pid); onChanged(); load() } catch (e) { alert((e as Error).message) }
+  }
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-4">
+      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center justify-between text-left">
+        <span className="text-sm font-semibold">💾 Penyimpanan: {gb(usage.total_mb)}</span>
+        <span className="text-xs text-zinc-500">
+          video {gb(usage.videos_mb)} · hasil {gb(usage.exports_mb)} {open ? '▴' : '▾'}
+        </span>
+      </button>
+      <div className="mt-2 h-2 overflow-hidden rounded bg-zinc-800">
+        <div className="h-full bg-sky-500" style={{ width: `${usage.total_mb > 0 ? Math.min(100, (usage.videos_mb / usage.total_mb) * 100) : 0}%` }} />
+      </div>
+      {open && (
+        <div className="mt-3 space-y-1">
+          {usage.by_project.map((p) => (
+            <div key={p.project_id} className="flex items-center gap-2 text-xs">
+              <span className="flex-1 truncate text-zinc-300">{p.name}</span>
+              <span className="font-mono text-zinc-500">{gb(p.mb)}</span>
+              <button
+                onClick={() => del(p.project_id, p.name)}
+                className="rounded bg-zinc-800 px-2 py-0.5 text-zinc-400 hover:bg-red-600 hover:text-white"
+                title="Hapus file video sumber (hemat disk)"
+              >
+                🗑 source
+              </button>
+            </div>
+          ))}
+          {usage.by_project.length === 0 && <p className="text-xs text-zinc-500">Kosong.</p>}
+        </div>
+      )}
+    </section>
+  )
+}
 
 const STATUS_STYLE: Record<string, string> = {
   ready: 'bg-emerald-500/15 text-emerald-400',
@@ -185,6 +233,8 @@ export default function Home() {
           </button>
         </div>
       </section>
+
+      <StorageBar onChanged={load} />
 
       <section>
         <h2 className="mb-3 text-lg font-semibold">Project</h2>

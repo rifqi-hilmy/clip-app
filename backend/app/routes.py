@@ -16,7 +16,8 @@ from .db import engine, get_session
 from .events import hub
 from .jobs import JobContext, enqueue
 from .models import Clip, Job, Project, Video
-from .services import captions, downloader, highlighter, reframer, renderer, transcriber
+from .services import captions, downloader, highlighter, reframer, renderer, silence, transcriber
+from .services.platforms import list_zones as _list_safe_zones
 
 router = APIRouter(prefix="/api")
 
@@ -78,10 +79,15 @@ class ClipIn(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     title: str = ""
-    aspect: str = "9:16"
+    aspect: str = "9:16"  # 9:16 | 1:1 | 4:5 | original  (Sprint 1/T2)
     reframe: str = "blur"
     crop_x: float = Field(0.5, ge=0, le=1)
     caption_style: Optional[str] = None  # None = no captions | bold | box | minimal
+    loudnorm: bool = True  # Sprint 1/T1
+    safe_zone: Optional[str] = None  # Sprint 1/T5: tiktok | reels | shorts | None
+    remove_silence: bool = False  # Sprint 1/T6
+    silence_db: float = -35.0  # Sprint 1/T6
+    silence_min_dur: float = 0.8  # Sprint 1/T6
 
 
 class ClipPatch(BaseModel):
@@ -92,6 +98,15 @@ class ClipPatch(BaseModel):
     reframe: Optional[str] = None
     crop_x: Optional[float] = Field(None, ge=0, le=1)
     caption_style: Optional[str] = None
+    loudnorm: Optional[bool] = None  # Sprint 1/T1
+    safe_zone: Optional[str] = None  # Sprint 1/T5
+    remove_silence: Optional[bool] = None  # Sprint 1/T6
+    silence_db: Optional[float] = None  # Sprint 1/T6
+    silence_min_dur: Optional[float] = None  # Sprint 1/T6
+
+
+class ReviewIn(BaseModel):
+    state: str  # pending | approved | rejected
 
 
 class TranscribeIn(BaseModel):
@@ -242,6 +257,84 @@ def retry_download(project_id: int, s: Session = Depends(get_session)) -> dict[s
     return job.model_dump(mode="json")
 
 
+# ---------- storage management (Sprint 1/T3) ----------
+
+def _dir_size_mb(path: Path) -> float:
+    total = 0
+    if path.exists():
+        for f in path.rglob("*"):
+            try:
+                if f.is_file() and not f.is_symlink():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+    return round(total / (1024 * 1024), 1)
+
+
+@router.get("/storage/usage")
+def storage_usage(s: Session = Depends(get_session)) -> dict[str, Any]:
+    videos_mb = _dir_size_mb(settings.videos_dir)
+    exports_mb = _dir_size_mb(settings.exports_dir)
+    by_project: list[dict[str, Any]] = []
+    for p in s.exec(select(Project)):
+        exp_mb = _dir_size_mb(settings.exports_dir / str(p.id))
+        v = s.get(Video, p.video_id)
+        src_mb = 0.0
+        if v and v.path:
+            try:
+                src_mb = Path(v.path).stat().st_size / (1024 * 1024)
+            except OSError:
+                src_mb = 0.0
+        by_project.append({"project_id": p.id, "name": p.name,
+                           "mb": round(exp_mb + src_mb, 1)})
+    by_project.sort(key=lambda x: x["mb"], reverse=True)
+    return {"total_mb": round(videos_mb + exports_mb, 1),
+            "videos_mb": videos_mb, "exports_mb": exports_mb,
+            "by_project": by_project}
+
+
+@router.delete("/projects/{project_id}/source")
+def delete_source(project_id: int, s: Session = Depends(get_session)) -> dict[str, str]:
+    """Delete the downloaded source video file; clips & transcript are kept."""
+    p = _project_or_404(s, project_id)
+    v = s.get(Video, p.video_id)
+    if v and v.path:
+        try:
+            Path(v.path).unlink(missing_ok=True)
+            Path(v.path).parent.rmdir()  # remove now-empty video dir
+        except OSError:
+            pass
+        v.path = None
+        s.add(v)
+        # every project sharing this video needs a re-download
+        for other in s.exec(select(Project).where(Project.video_id == v.id)):
+            other.status = "created"
+            s.add(other)
+    s.commit()
+    return {"status": "deleted"}
+
+
+@router.delete("/videos/{video_id}/cache")
+def delete_video_cache(video_id: int, s: Session = Depends(get_session)) -> dict[str, str]:
+    v = s.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "Video not found")
+    if s.exec(select(Project.id).where(Project.video_id == video_id)).first():
+        raise HTTPException(409, "Video masih dipakai project — hapus project dulu")
+    if v.path:
+        try:
+            Path(v.path).unlink(missing_ok=True)
+            Path(v.path).parent.rmdir()
+        except OSError:
+            pass
+    tdir = downloader.video_dir(v.youtube_id)
+    if tdir.exists():
+        shutil.rmtree(tdir, ignore_errors=True)
+    s.delete(v)
+    s.commit()
+    return {"status": "deleted"}
+
+
 @router.delete("/projects/{project_id}")
 def delete_project(project_id: int, s: Session = Depends(get_session)) -> dict[str, str]:
     p = _project_or_404(s, project_id)
@@ -291,6 +384,12 @@ def caption_presets() -> list[dict[str, str]]:
     return [{"id": k, "label": v["label"]} for k, v in captions.PRESETS.items()]
 
 
+@router.get("/platforms/safe-zones")
+def safe_zones() -> list[dict[str, str]]:
+    """Sprint 1/T5: per-platform safe zones for the 9:16 canvas."""
+    return _list_safe_zones()
+
+
 @router.post("/projects/{project_id}/transcribe")
 def start_transcribe(project_id: int, body: TranscribeIn, s: Session = Depends(get_session)) -> dict[str, Any]:
     p = _project_or_404(s, project_id)
@@ -326,11 +425,20 @@ def _validate_range(start: float, end: float, duration: float) -> None:
         raise HTTPException(400, "End melebihi durasi video")
 
 
+_VALID_ASPECTS = {"9:16", "1:1", "4:5", "original"}  # Sprint 1/T2
+
+
+def _validate_aspect(aspect: Optional[str]) -> None:
+    if aspect is not None and aspect not in _VALID_ASPECTS:
+        raise HTTPException(400, f"Aspect tidak valid: {aspect}")
+
+
 @router.post("/projects/{project_id}/clips")
 def create_clip(project_id: int, body: ClipIn, s: Session = Depends(get_session)) -> dict[str, Any]:
     p = _project_or_404(s, project_id)
     v = s.get(Video, p.video_id)
     _validate_range(body.start, body.end, v.duration if v else 0)
+    _validate_aspect(body.aspect)
     c = Clip(project_id=p.id, **body.model_dump())
     if not c.title:
         n = len(s.exec(select(Clip.id).where(Clip.project_id == p.id)).all()) + 1
@@ -351,6 +459,7 @@ def update_clip(clip_id: int, body: ClipPatch, s: Session = Depends(get_session)
     p = s.get(Project, c.project_id)
     v = s.get(Video, p.video_id) if p else None
     _validate_range(c.start, c.end, v.duration if v else 0)
+    _validate_aspect(c.aspect)
     s.add(c)
     s.commit()
     s.refresh(c)
@@ -369,6 +478,38 @@ def delete_clip(clip_id: int, s: Session = Depends(get_session)) -> dict[str, st
     return {"status": "deleted"}
 
 
+# ---------- clip review (Sprint 1/T4) ----------
+
+@router.patch("/clips/{clip_id}/review")
+def review_clip(clip_id: int, body: ReviewIn, s: Session = Depends(get_session)) -> dict[str, Any]:
+    c = s.get(Clip, clip_id)
+    if not c:
+        raise HTTPException(404, "Clip not found")
+    if body.state not in ("pending", "approved", "rejected"):
+        raise HTTPException(400, "State tidak valid: pending | approved | rejected")
+    c.review_state = body.state
+    s.add(c)
+    s.commit()
+    s.refresh(c)
+    return clip_out(c)
+
+
+@router.post("/projects/{project_id}/review-all")
+def review_all_clips(project_id: int, body: ReviewIn,
+                     s: Session = Depends(get_session)) -> dict[str, int]:
+    p = _project_or_404(s, project_id)
+    if body.state not in ("pending", "approved", "rejected"):
+        raise HTTPException(400, "State tidak valid: pending | approved | rejected")
+    n = 0
+    for c in s.exec(select(Clip).where(Clip.project_id == p.id,
+                                       Clip.review_state == "pending")):
+        c.review_state = body.state
+        s.add(c)
+        n += 1
+    s.commit()
+    return {"updated": n}
+
+
 def _render_job(clip_id: int) -> Any:
     def run(ctx: JobContext) -> None:
         with Session(engine) as s:
@@ -381,7 +522,8 @@ def _render_job(clip_id: int) -> Any:
                 raise RuntimeError("Video sumber belum di-download")
             out = settings.exports_dir / str(c.project_id) / f"clip_{c.id:03d}_{_slug(c.title)}.mp4"
             spec = renderer.RenderSpec(source=Path(v.path), output=out, start=c.start, end=c.end,
-                                       aspect=c.aspect, reframe=c.reframe, crop_x=c.crop_x)
+                                       aspect=c.aspect, reframe=c.reframe, crop_x=c.crop_x,
+                                       loudnorm=c.loudnorm)
             project_id, style, yid = c.project_id, c.caption_style, v.youtube_id
 
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -401,16 +543,37 @@ def _render_job(clip_id: int) -> Any:
                 logging.getLogger("clip.render").warning("Face tracking failed, falling back to center: %s", exc)
                 spec.reframe = "center"  # fallback
 
+        # Sprint 1/T6: silence removal — detect keep-ranges before captions so
+        # word timings can be remapped to the trimmed timeline.
+        if c.remove_silence:
+            ctx.update(0.0, "Mendeteksi jeda diam…")
+            try:
+                found = silence.detect_silences(spec.source, spec.start, spec.end,
+                                                db=c.silence_db, min_dur=c.silence_min_dur)
+                ranges = silence.nonsilent_ranges(spec.end - spec.start, found)
+                full = [(0.0, spec.end - spec.start)]
+                if ranges != full:
+                    spec.keep_ranges = ranges
+                    ctx.update(0.05, f"Jeda diam dibuang: {len(ranges)} segmen")
+            except Exception as exc:
+                import logging
+                logging.getLogger("clip.render").warning(
+                    "Silence detect failed, keeping full clip: %s", exc)
+
         srt_path = out.with_suffix(".srt")
         transcript = transcriber.load_transcript(downloader.video_dir(yid))
         if transcript:
             words = captions.words_in_range(transcript, spec.start, spec.end)
+            if spec.keep_ranges:
+                words = captions.retime_words(words, spec.keep_ranges)
             srt_path.write_text(captions.build_srt(words), encoding="utf-8")
             if style:
                 info = renderer.probe(spec.source)
                 w, h = renderer.output_size(spec, info["width"], info["height"])
                 spec.ass_file = out.with_suffix(".ass")
-                spec.ass_file.write_text(captions.build_ass(words, style, w, h), encoding="utf-8")
+                spec.ass_file.write_text(
+                    captions.build_ass(words, style, w, h, c.safe_zone),  # Sprint 1/T5
+                    encoding="utf-8")
         elif style:
             raise RuntimeError("Caption butuh transkrip — jalankan Transkripsi dulu")
         else:
@@ -438,16 +601,25 @@ def render_clip(clip_id: int, s: Session = Depends(get_session)) -> dict[str, An
     c = s.get(Clip, clip_id)
     if not c:
         raise HTTPException(404, "Clip not found")
+    if c.review_state != "approved":  # Sprint 1/T4
+        raise HTTPException(409, "Klip belum di-approve — selesaikan review dulu")
     job = enqueue(Job(project_id=c.project_id, clip_id=c.id, type="render"), _render_job(c.id))
     return job.model_dump(mode="json")
 
 
 @router.post("/projects/{project_id}/render-all")
-def render_all(project_id: int, s: Session = Depends(get_session)) -> list[dict[str, Any]]:
+def render_all(project_id: int, s: Session = Depends(get_session)) -> dict[str, Any]:
     p = _project_or_404(s, project_id)
     clips = s.exec(select(Clip).where(Clip.project_id == p.id).order_by(col(Clip.start))).all()
-    return [enqueue(Job(project_id=p.id, clip_id=c.id, type="render"), _render_job(c.id)).model_dump(mode="json")
-            for c in clips]
+    jobs: list[dict[str, Any]] = []
+    skipped = 0
+    for c in clips:
+        if c.review_state != "approved":  # Sprint 1/T4
+            skipped += 1
+            continue
+        jobs.append(enqueue(Job(project_id=p.id, clip_id=c.id, type="render"),
+                            _render_job(c.id)).model_dump(mode="json"))
+    return {"jobs": jobs, "skipped": skipped}
 
 
 def _highlight_job(project_id: int, settings_dict: dict[str, Any]) -> Any:
@@ -488,6 +660,7 @@ def _highlight_job(project_id: int, settings_dict: dict[str, Any]) -> Any:
                     source="ai",
                     score=r.score,
                     reason=r.reason,
+                    review_state="pending",  # Sprint 1/T4: must be reviewed before render
                 ))
             s.commit()
 

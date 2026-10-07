@@ -48,6 +48,12 @@ class Clip(SQLModel, table=True):
     reframe: str = "blur"  # blur | center | face
     crop_x: float = 0.5  # horizontal crop center (0..1) for "center" mode
     caption_style: Optional[str] = None
+    loudnorm: bool = True  # Sprint 1/T1: loudness normalization on render
+    review_state: str = "approved"  # Sprint 1/T4: pending | approved | rejected
+    safe_zone: Optional[str] = None  # Sprint 1/T5: tiktok | reels | shorts | None
+    remove_silence: bool = False  # Sprint 1/T6
+    silence_db: float = -35.0  # Sprint 1/T6
+    silence_min_dur: float = 0.8  # Sprint 1/T6
     export_path: Optional[str] = None
     created_at: datetime = Field(default_factory=_now)
 

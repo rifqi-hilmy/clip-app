@@ -82,6 +82,17 @@ export default function ClipCard({
             {Math.round(clip.score)}
           </span>
         )}
+        {/* Sprint 1/T4: review badge */}
+        {clip.review_state === 'pending' && (
+          <span className="shrink-0 rounded bg-amber-600/30 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+            ⏳ Perlu review
+          </span>
+        )}
+        {clip.review_state === 'rejected' && (
+          <span className="shrink-0 rounded bg-red-600/30 px-1.5 py-0.5 text-[10px] font-semibold text-red-300">
+            ✕ Ditolak
+          </span>
+        )}
         <input
           defaultValue={clip.title}
           key={clip.title}
@@ -119,9 +130,11 @@ export default function ClipCard({
               className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1"
             >
               <option value="9:16">9:16 (Shorts/TikTok)</option>
+              <option value="1:1">1:1 (Feed)</option>
+              <option value="4:5">4:5 (Feed IG/FB)</option>
               <option value="original">Rasio asli</option>
             </select>
-            {clip.aspect === '9:16' && (
+            {clip.aspect !== 'original' && (
               <select
                 value={clip.reframe}
                 onChange={(e) => patch({ reframe: e.target.value as Clip['reframe'] })}
@@ -132,6 +145,18 @@ export default function ClipCard({
                 <option value="center">Crop (geser manual)</option>
               </select>
             )}
+            {/* Sprint 1/T5: safe zone */}
+            <select
+              value={clip.safe_zone ?? ''}
+              onChange={(e) => patch({ safe_zone: e.target.value || null })}
+              title="Zona aman platform (caption & teks tidak tertutup UI)"
+              className="rounded border border-zinc-700 bg-zinc-950 px-1.5 py-1"
+            >
+              <option value="">Safe-zone: off</option>
+              <option value="tiktok">📱 TikTok</option>
+              <option value="reels">📸 Reels</option>
+              <option value="shorts">▶ Shorts</option>
+            </select>
             <select
               value={clip.caption_style ?? ''}
               disabled={!hasTranscript}
@@ -146,7 +171,7 @@ export default function ClipCard({
             </select>
           </div>
 
-          {clip.aspect === '9:16' && clip.reframe === 'center' && (
+          {clip.aspect !== 'original' && clip.reframe === 'center' && (
             <label className="flex items-center gap-2">
               <span className="text-zinc-500">Posisi crop</span>
               <input
@@ -164,11 +189,88 @@ export default function ClipCard({
             </label>
           )}
 
+          {/* Sprint 1: audio & silence controls */}
+          <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/50 p-2">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={clip.loudnorm}
+                onChange={(e) => patch({ loudnorm: e.target.checked })}
+                className="accent-emerald-500"
+              />
+              <span className="text-zinc-300">🔊 Normalisasi volume</span>
+              <span className="text-[10px] text-zinc-500">(-16 LUFS)</span>
+            </label>
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={clip.remove_silence}
+                onChange={(e) => patch({ remove_silence: e.target.checked })}
+                className="accent-emerald-500"
+              />
+              <span className="text-zinc-300">✂️ Buang jeda diam</span>
+            </label>
+            {clip.remove_silence && (
+              <div className="space-y-1.5 pl-6">
+                <label className="flex items-center gap-2">
+                  <span className="w-24 text-zinc-500">Threshold</span>
+                  <input
+                    type="range" min={-50} max={-20} step={1}
+                    defaultValue={clip.silence_db} key={`db${clip.silence_db}`}
+                    onMouseUp={(e) => patch({ silence_db: Number((e.target as HTMLInputElement).value) })}
+                    className="flex-1 accent-amber-400"
+                  />
+                  <span className="w-12 text-right font-mono">{clip.silence_db} dB</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <span className="w-24 text-zinc-500">Min. jeda</span>
+                  <input
+                    type="range" min={0.3} max={3} step={0.1}
+                    defaultValue={clip.silence_min_dur} key={`md${clip.silence_min_dur}`}
+                    onMouseUp={(e) => patch({ silence_min_dur: Number((e.target as HTMLInputElement).value) })}
+                    className="flex-1 accent-amber-400"
+                  />
+                  <span className="w-12 text-right font-mono">{clip.silence_min_dur.toFixed(1)}s</span>
+                </label>
+              </div>
+            )}
+          </div>
+
+          {/* Sprint 1/T4: quick review actions */}
+          {clip.review_state === 'pending' && (
+            <div className="flex items-center gap-2 rounded-lg border border-amber-600/40 bg-amber-600/10 p-2">
+              <span className="flex-1 text-amber-200">Klip AI ini perlu direview:</span>
+              <button
+                onClick={async () => {
+                  setErr(null)
+                  try { await api.reviewClip(clip.id, 'approved'); await onChange({}) } catch (e) { setErr((e as Error).message) }
+                }}
+                className="rounded bg-emerald-600 px-2.5 py-1 font-semibold hover:bg-emerald-500"
+              >
+                ✓ Terima
+              </button>
+              <button
+                onClick={async () => {
+                  setErr(null)
+                  try { await api.reviewClip(clip.id, 'rejected'); await onChange({}) } catch (e) { setErr((e as Error).message) }
+                }}
+                className="rounded bg-zinc-700 px-2.5 py-1 hover:bg-zinc-600"
+              >
+                Tolak
+              </button>
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <button onClick={onPreview} className="rounded-md bg-zinc-800 px-3 py-1.5 hover:bg-zinc-700">
               ▶ Preview
             </button>
-            <button onClick={render} disabled={busy} className="rounded-md bg-rose-600 px-3 py-1.5 font-semibold hover:bg-rose-500 disabled:opacity-50">
+            <button
+              onClick={render}
+              disabled={busy || clip.review_state !== 'approved'}
+              title={clip.review_state !== 'approved' ? 'Terima klip ini di review dulu' : undefined}
+              className="rounded-md bg-rose-600 px-3 py-1.5 font-semibold hover:bg-rose-500 disabled:opacity-50"
+            >
               {busy ? 'Rendering…' : clip.export_url ? 'Render ulang' : 'Render'}
             </button>
             {clip.export_url && (
